@@ -68,6 +68,35 @@ return function(options)
   end
 
 
+  do
+    local timer_module = require("resty.timerng")
+    local timer_sys
+
+    if options.cli or options.rbusted then
+      timer_sys = timer_module.new({
+        min_threads = 16,
+        max_threads = 32,
+      })
+      timer_sys:start()
+
+    else
+      timer_sys = timer_module.new()
+    end
+
+    _G.ngx.timer.at = function (delay, callback, ...)
+      return timer_sys:at(delay, callback, ...)
+    end
+
+    _G.ngx.timer.every = function (interval, callback, ...)
+      return timer_sys:every(interval, callback, ...)
+    end
+
+    _G.hack_timer_sys_start = function ()
+      timer_sys:start()
+    end
+  end
+
+
 
   do  -- implement a Lua based shm for: cli (and hence rbusted)
 

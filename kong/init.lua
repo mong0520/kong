@@ -592,6 +592,7 @@ function Kong.init_worker()
   -- duplicated seeds.
   math.randomseed()
 
+  _G.hack_timer_sys_start()
 
   -- init DB
 

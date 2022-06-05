@@ -1,4 +1,5 @@
 local cache_warmup = require("kong.cache.warmup")
+local helpers = require("spec.helpers")
 
 
 local function mock_entity(db_data, entity_name, cache_key)
@@ -213,18 +214,21 @@ describe("cache_warmup", function()
 
     assert.truthy(cache_warmup.execute({"my_entity", "services"}))
 
-    ngx.sleep(0) -- yield so that async DNS caching happens
+    -- waiting async DNS cacheing
+    helpers.wait_until(function ()
+      return pcall(function ()
+        -- `my_entity` isn't a core entity; lookup is on client cache
+        assert.same(kong.cache:get("111").bbb, 222)
+        assert.same(kong.cache:get("333").bbb, 444)
 
-    -- `my_entity` isn't a core entity; lookup is on client cache
-    assert.same(kong.cache:get("111").bbb, 222)
-    assert.same(kong.cache:get("333").bbb, 444)
+        assert.same(kong.core_cache:get("a").host, "example.com")
+        assert.same(kong.core_cache:get("b").host, "1.2.3.4")
+        assert.same(kong.core_cache:get("c").host, "example.test")
 
-    assert.same(kong.core_cache:get("a").host, "example.com")
-    assert.same(kong.core_cache:get("b").host, "1.2.3.4")
-    assert.same(kong.core_cache:get("c").host, "example.test")
-
-    -- skipped IP entry
-    assert.same({ "example.com", "example.test" }, dns_queries)
+        -- skipped IP entry
+        assert.same({ "example.com", "example.test" }, dns_queries)
+      end)
+    end, 5)
   end)
 
 
@@ -266,19 +270,23 @@ describe("cache_warmup", function()
 
     assert.truthy(cache_warmup.execute({"my_entity", "services"}))
 
-    ngx.sleep(0.001) -- yield so that async DNS caching happens
+    -- waiting async DNS cacheing
+    helpers.wait_until(function ()
+      return pcall(function ()
+        -- `my_entity` isn't a core entity; lookup is on client cache
+        assert.same(kong.cache:get("111").bbb, 222)
+        assert.same(kong.cache:get("333").bbb, 444)
 
-    -- `my_entity` isn't a core entity; lookup is on client cache
-    assert.same(kong.cache:get("111").bbb, 222)
-    assert.same(kong.cache:get("333").bbb, 444)
+        assert.same(kong.core_cache:get("a").host, "example.com")
+        assert.same(kong.core_cache:get("b").host, "1.2.3.4")
+        assert.same(kong.core_cache:get("c").host, "example.test")
+        assert.same(kong.core_cache:get("d").host, "thisisan.upstream.test")
 
-    assert.same(kong.core_cache:get("a").host, "example.com")
-    assert.same(kong.core_cache:get("b").host, "1.2.3.4")
-    assert.same(kong.core_cache:get("c").host, "example.test")
-    assert.same(kong.core_cache:get("d").host, "thisisan.upstream.test")
+        -- skipped IP entry
+        assert.same({ "example.com", "example.test" }, dns_queries)
+      end)
+    end)
 
-    -- skipped IP entry
-    assert.same({ "example.com", "example.test" }, dns_queries)
   end)
 
 
