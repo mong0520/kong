@@ -528,7 +528,7 @@ local CONF_INFERENCES = {
   opentelemetry_tracing = { typ = "array" },
   opentelemetry_tracing_sampling_rate = { typ = "number" },
 
-  legacy_timer_mechanism = { typ = "boolean" }
+  legacy_timer_mechanism = { typ = "boolean" },
 }
 
 
