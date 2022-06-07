@@ -187,10 +187,11 @@ return {
   },
   ["/timers"] = {
     GET = function (self, db, helpers)
-      if not kong.configuration.legacy_timer_mechanism then
-        return kong.response.exit(200, _G.hack_timerng_stats())
+      if kong.configuration.legacy_timer_mechanism then
+        return kong.response.exit(404)
       end
-      return kong.response.exit(404)
+
+      return kong.response.exit(200, _G.hack_timerng_stats())
     end
   }
 }

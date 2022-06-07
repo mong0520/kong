@@ -69,70 +69,78 @@ return function(options)
 
 
   do
-    local timer_module = require("resty.timerng")
     local timerng
 
     if options.cli or options.rbusted then
-      timerng = timer_module.new({
+      timerng = require("resty.timerng").new({
         min_threads = 16,
         max_threads = 32,
       })
-      timerng:start()
 
-    else
-      timerng = timer_module.new()
-    end
-
-    local native_timer_at = ngx.timer.at
-    local native_timer_every = ngx.timer.every
-
-    local is_patched = false
-
-    _G.ngx.timer.at = function (delay, callback, ...)
-      if is_patched then
+      _G.ngx.timer.at = function (delay, callback, ...)
         return timerng:at(delay, callback, ...)
       end
 
-      return native_timer_at(delay, callback, ...)
-    end
-
-    _G.ngx.timer.every = function (interval, callback, ...)
-      if is_patched then
+      _G.ngx.timer.every = function (interval, callback, ...)
         return timerng:every(interval, callback, ...)
       end
 
-      return native_timer_every(interval, callback, ...)
-    end
-
-    _G.hack_timerng_patch = function ()
-      is_patched = true
-    end
-
-    _G.hack_timerng_unpatch = function ()
-      is_patched = false
-    end
-
-    _G.hack_timerng_destroy = function ()
-      _G.hack_timerng_unpatch()
-      timerng:destroy()
-    end
-
-    -- TODO rename
-    _G.hack_timerng_start = function (debug)
       timerng:start()
-      timerng:set_debug(debug)
-    end
 
-    -- TODO rename
-    _G.hack_timerng_stats = function ()
-      if is_patched then
-        return timerng:stats({
-          verbose = true,
-          flamegraph = true,
-        })
+    else
+      timerng = require("resty.timerng").new()
+
+      local native_timer_at = ngx.timer.at
+      local native_timer_every = ngx.timer.every
+
+      local is_patched = false
+
+      _G.ngx.timer.at = function (delay, callback, ...)
+        if is_patched then
+          return timerng:at(delay, callback, ...)
+        end
+
+        return native_timer_at(delay, callback, ...)
       end
 
-      return nil
+      _G.ngx.timer.every = function (interval, callback, ...)
+        if is_patched then
+          return timerng:every(interval, callback, ...)
+        end
+
+        return native_timer_every(interval, callback, ...)
+      end
+
+      _G.hack_timerng_patch = function ()
+        is_patched = true
+      end
+
+      _G.hack_timerng_unpatch = function ()
+        is_patched = false
+      end
+
+      _G.hack_timerng_destroy = function ()
+        _G.hack_timerng_unpatch()
+        timerng:destroy()
+      end
+
+      -- TODO rename
+      _G.hack_timerng_start = function (debug)
+        timerng:start()
+        timerng:set_debug(debug)
+      end
+
+      -- TODO rename
+      _G.hack_timerng_stats = function ()
+        if is_patched then
+          return timerng:stats({
+            verbose = true,
+            flamegraph = true,
+          })
+        end
+
+        return nil
+      end
     end
   end
 
