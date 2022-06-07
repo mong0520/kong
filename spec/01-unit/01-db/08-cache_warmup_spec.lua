@@ -228,7 +228,7 @@ describe("cache_warmup", function()
         -- skipped IP entry
         assert.same({ "example.com", "example.test" }, dns_queries)
       end)
-    end, 5)
+    end)
   end)
 
 
