@@ -185,4 +185,9 @@ return {
       return kong.response.exit(200, copy)
     end
   },
+  ["/timer"] = {
+    GET = function (self, db, helpers)
+      return kong.response.exit(200, _G.hack_timer_sys_stats())
+    end
+  }
 }

@@ -91,8 +91,18 @@ return function(options)
       return timer_sys:every(interval, callback, ...)
     end
 
+    -- TODO rename
     _G.hack_timer_sys_start = function ()
       timer_sys:start()
+      timer_sys:set_debug(kong.configuration.log_level == "debug")
+    end
+
+    -- TODO rename
+    _G.hack_timer_sys_stats = function ()
+      return timer_sys:stats({
+        verbose = true,
+        flamegraph = true,
+      })
     end
   end
 
