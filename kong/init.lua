@@ -592,7 +592,13 @@ function Kong.init_worker()
   -- duplicated seeds.
   math.randomseed()
 
-  _G.hack_timer_sys_start()
+  if not kong.configuration.legacy_timer_mechanism then
+    _G.hack_timerng_patch()
+    _G.hack_timerng_start(kong.configuration.log_level == "debug")
+
+  else
+    _G.hack_timerng_destroy()
+  end
 
   -- init DB
 
