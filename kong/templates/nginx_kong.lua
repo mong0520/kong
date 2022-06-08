@@ -180,6 +180,7 @@ server {
         set $upstream_x_forwarded_path   '';
         set $upstream_x_forwarded_prefix '';
         set $kong_proxy_mode             'http';
+        set $error_code                  '';
 
         proxy_http_version      1.1;
         proxy_buffering          on;

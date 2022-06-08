@@ -3,6 +3,7 @@ local pretty       = require "pl.pretty"
 local utils        = require "kong.tools.utils"
 local cjson        = require "cjson"
 local vault        = require "kong.pdk.vault".new()
+local singletons = require "kong.singletons"
 
 
 local is_reference = vault.is_reference
@@ -1554,6 +1555,15 @@ local function adjust_field_for_context(field, value, context, nulls, opts)
     return value
   end
 
+  -- UID Patch starts
+  if context == "insert" or context == "upsert" or context == "update" then
+    if field.encrypted == true and value and singletons.cryptoService then
+      --print(string.format("in adjust_field_for_context, find %s need encrypt: #%s#, context: %s, type nulls: %s", tostring(field), value, context, type(nulls)))
+      value = singletons.cryptoService:encrypt_plaintext(value)
+    end
+  end
+  -- UID Patch ends
+
   if field.type == "record" then
     if should_recurse_record(context, value, field) then
       value = value or handle_missing_field(field, value, opts)
@@ -1675,6 +1685,9 @@ function Schema:process_auto_fields(data, context, nulls, opts)
     end
   end
 
+  -- force set resolve_references to true to avoid encrypt tne encryption fields agian and again
+  resolve_references = true
+
   for key, field in self:each_field(data) do
     local ftype = field.type
     local value = data[key]
@@ -1727,6 +1740,14 @@ function Schema:process_auto_fields(data, context, nulls, opts)
       end
 
       if resolve_references then
+
+        -- UID patch starts
+        if context == "select" and field.encrypted and singletons.cryptoService then
+          ngx.log(ngx.DEBUG, string.format("encrypted field found: %s, ciphertext: %s", key, value))
+          value = singletons.cryptoService:decrypt_ciphertext(value)
+        end
+        -- UID patch ends
+
         if ftype == "string" and field.referenceable then
           if is_reference(value) then
             local deref, err = dereference(value)

@@ -13,6 +13,10 @@ local utils = require "kong.tools.utils"
 local log = require "kong.cmd.utils.log"
 local env = require "kong.cmd.utils.env"
 local ffi = require "ffi"
+local AwsService = require "api-gateway.aws.AwsService"
+local http = require"api-gateway.aws.httpclient.http"
+local restyhttp = require"api-gateway.aws.httpclient.restyhttp"
+local cjson = require "cjson"
 
 
 local fmt = string.format
@@ -24,6 +28,26 @@ ffi.cdef([[
   struct passwd *getpwnam(const char *name);
 ]])
 
+local function detect_region_from_ec2metadata()
+  local http_client = http:new()
+  local ok, code, headers, status, body = http_client:request({
+    scheme = "http",
+    ssl_verify = false,
+    port = 80,
+    timeout = 60000,
+    url = "/latest/meta-data/placement/availability-zone",
+    host = "169.254.169.254",
+    body = "",
+    method = "GET",
+    headers = {},
+    keepalive = 30000,
+    poolsize = 1
+  })
+  if status == 200 then
+    -- remove trailing lowercase letters
+    region = string.gsub(body, "%l+$", "")
+  end
+end
 
 -- Version 5: https://wiki.mozilla.org/Security/Server_Side_TLS
 local cipher_suites = {
@@ -1794,6 +1818,208 @@ local function load(path, custom_conf, opts)
   -- initialize the dns client, so the globally patched tcp.connect method
   -- will work from here onwards.
   assert(require("kong.tools.dns")(conf))
+
+  local env = os.getenv("ENV")
+  local app = os.getenv("APP")
+  -- if "ENV" and "APP" environment viariables are set, read from aws secrets manager and aws systems manager
+  if env ~= nil and app ~= nil and env ~= "" and app ~= "" then
+      print("reading configuration from aws secrets manager and systems manager")
+
+      -- KONG_AWS_REGION must be set when not running in AWS infrastructure
+      local region = os.getenv("KONG_AWS_REGION") or ""
+      local access_key_id = os.getenv("KONG_AWS_ACCESS_KEY_ID") or ""
+      local secret_access_key = os.getenv("KONG_AWS_SECRET_ACCESS_KEY") or ""
+      local aws_session_token = os.getenv("KONG_AWS_SESSION_TOKEN")
+
+      if region == "" then
+          region = detect_region_from_ec2metadata()
+      end
+
+
+      local aws_credentials = {}
+      if access_key_id ~= "" and secret_access_key ~= "" then
+          aws_credentials = {
+              provider = "api-gateway.aws.AWSBasicCredentials",
+              access_key = access_key_id,
+              secret_key = secret_access_key,
+              aws_session_token = aws_session_token,
+          }
+      else
+          aws_credentials = {
+            provider = "api-gateway.aws.AWSIAMCredentials",
+          }
+      end
+
+      -- shared data
+      local setok, seterr = ngx.shared.kong:set("aws_config", cjson.encode({
+          env = env,
+          app = app,
+          region = region,
+          access_key_id = access_key_id,
+          secret_access_key = secret_access_key,
+          security_credentials_url = os.getenv("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"),
+      }))
+      assert(setok, seterr)
+
+      -- depends on the context where this script is executed, choose one https library.
+      -- restyhttp is more efficient, but it is not supported in every context
+      local traceback = debug.traceback()
+      -- print("traceback:", type(traceback), traceback)
+      local http_client = nil
+      local idx = string.find(traceback, "kong/cmd")
+      if idx then
+          print("use resty http (cosocket) to send https requests")
+          http_client = restyhttp:new()
+      else
+          print("use luasocket + luasec to send http(s) requests")
+          http_client = http:new()
+      end
+      local secretsmanager = AwsService:new({
+          http_client = http_client,
+          aws_service = "secretsmanager",
+          aws_service_name = "secretsmanager",
+          aws_region = region,
+          aws_credentials = aws_credentials,
+          aws_debug = false,
+          aws_conn_keepalive = 60000,
+          aws_conn_pool = 10
+      })
+      local ssm = AwsService:new({
+          http_client = http_client,
+          aws_service = "ssm",
+          aws_service_name = "AmazonSSM",
+          aws_region = region,
+          aws_credentials = aws_credentials,
+          aws_debug = false,
+          aws_conn_keepalive = 60000,
+          aws_conn_pool = 10
+      })
+      local function read_from_secrets_manaager(key)
+          local input = {
+            SecretId = key,
+            VersionStage = "AWSCURRENT"
+          }
+
+          local remain_try = 3
+          while remain_try > 0 do
+              local ok, code, headers, status, body = secretsmanager:performAction("GetSecretValue", input, "/", "POST", true, 60000, "application/x-amz-json-1.1")
+
+              local result
+              if body ~= nil then
+                  result = cjson.decode(body)
+              end
+
+              if code ~= ngx.HTTP_OK then
+                  if result ~= nil then
+                      if result["__type"] == "ResourceNotFoundException" or result["__type"] == "InvalidRequestException" then
+                          return nil, false, nil
+                      elseif result["__type"] == "InvalidSignatureException" then
+                          -- probably timed out
+                          remain_try = remain_try - 1
+                      end
+                  else
+                      return nil, false, body
+                  end
+              else
+                  if result ~= nil then
+                      return result["SecretString"], true, nil
+                  else
+                      return nil, false, "No returned result from secrets manager"
+                  end
+              end
+          end
+      end
+      local parameters_cache = nil
+      local function read_from_systems_manager(key)
+          -- print("reading from systems manager", "cache is nil", parameters_cache)
+          if not parameters_cache then
+              parameters_cache = {}
+
+              -- batch load all parameters into cache
+              local next_token = nil
+              while true do
+                  local input = {
+                      MaxResults = 10,
+                      NextToken = next_token,
+                      Path = string.format("/%s/%s/", env, app),
+                      Recursive = true,
+                      WithDecryption = true
+                  }
+
+                  -- print("call ssm api to load parameters by path")
+                  local ok, code, headers, status, body = ssm:performAction("GetParametersByPath", input, "/", "POST", true, 60000, "application/x-amz-json-1.1")
+                  -- print("GetParametersByPath result, body", body)
+
+                  local result
+                  if body ~= nil then
+                      result = cjson.decode(body)
+                  end
+
+                  if code ~= ngx.HTTP_OK then
+                      return "", false, body
+                  else
+                      -- go this branch even if there are no parameters in the path
+                      next_token = result["NextToken"]
+                      local parameters = result["Parameters"]
+                      print("returned parameters count " .. #parameters, type(parameters))
+                      for k, v in ipairs(parameters) do
+                          parameters_cache[v["Name"]] = v["Value"]
+                      end
+                      if #parameters == 0 or next_token == "" or not next_token then
+                          print("no more parameters, finished loading parameters cache")
+                          -- print("parameters found in cache:")
+                          -- for k, v in pairs(parameters_cache) do
+                          --     print("key " .. k .. ", value " .. v)
+                          -- end
+                          break
+                      end
+                  end
+              end
+          end
+          value = parameters_cache[key]
+          return value, value ~= nil, nil
+      end
+
+      -- database in config file, or KONG_DATABASE environment variable is used to config postgres/cassadra, /{ENV}/{APP}/DATABASE in ssm or sm is used to configure credentials
+      -- backup and clear the database config, and populate it with values from ssm or sm
+      local database_strategy = conf["database"] -- postgres/cassandra/off
+      local database_key = "database_app"
+      if (custom_conf and custom_conf._is_migration == true) then
+        database_key = "database"
+      end
+      conf[database_key] = ""
+      for key, value in pairs(conf) do
+          secret_key = string.format("/%s/%s/%s", env, app, string.upper(key))
+          local secret_value, ok, err = read_from_secrets_manaager(secret_key)
+          -- print("value from secrets manager ", "key ", key, " value ", secret_value, " ok ", ok, " error ", err)
+          if err ~= nil then
+              return nil, "failed to load secrets from secrets manager" .. err
+          end
+          if ok then
+              conf[key] = secret_value
+          else
+              local secret_value, ok, err = read_from_systems_manager(secret_key)
+              -- print("value from systems manager ", " key ", key, " value ", secret_value, " ok ", ok, " error ", err)
+              if err ~= nil then
+                  return nil, "failed to load secrets from systems manager" .. err
+              end
+              if ok then
+                  conf[key] = secret_value
+              end
+          end
+      end
+      -- if /{ENV}/{APP}/DATABASE is set in ssm or sm, overrides values set in pg_host, pg_port, pg_user, pg_password, pg_database
+      if conf[database_key] ~= "" then
+          local database_conf = cjson.decode(conf[database_key])
+          conf["pg_host"] = database_conf["host"]
+          conf["pg_port"] = database_conf["port"]
+          conf["pg_user"] = database_conf["username"]
+          conf["pg_password"] = database_conf["password"]
+          conf["pg_database"] = database_conf["dbname"]
+      end
+      -- restore database config
+      conf["database"] = database_strategy
+  end
 
   return setmetatable(conf, nil) -- remove Map mt
 end

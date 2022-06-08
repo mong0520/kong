@@ -82,9 +82,13 @@ local function execute(args)
     log.disable()
   end
 
-  local conf = assert(conf_loader(args.conf, {
-    prefix = args.prefix
-  }))
+  local conf = assert(conf_loader(
+    args.conf,
+    {
+      prefix = args.prefix,
+      _is_migration = true
+    }
+  ))
 
   package.path = conf.lua_package_path .. ";" .. package.path
 

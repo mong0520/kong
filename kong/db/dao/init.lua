@@ -879,7 +879,7 @@ local function generate_foreign_key_methods(schema)
           return nil, err, err_t
         end
 
-        local show_ws_id = { show_ws_id = true }
+        local show_ws_id = { show_ws_id = true, read_before_delete = true}
         local entity, err, err_t = self["select_by_" .. name](self, unique_value, show_ws_id)
         if err then
           return nil, err, err_t

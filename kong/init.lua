@@ -85,6 +85,7 @@ local balancer = require "kong.runloop.balancer"
 local kong_error_handlers = require "kong.error_handlers"
 local migrations_utils = require "kong.cmd.utils.migrations"
 local plugin_servers = require "kong.runloop.plugin_servers"
+local KMSRpcCryptoService = require "api-gateway.crypto.KMSRpcCryptoService"
 
 local kong             = kong
 local ngx              = ngx
@@ -523,6 +524,7 @@ function Kong.init()
   singletons.dns = dns(config)
   singletons.configuration = config
   singletons.db = db
+  singletons.cryptoService = KMSRpcCryptoService.new(config)
   -- /LEGACY
 
   kong.db = db

@@ -6,6 +6,11 @@ local stringx      = require "pl.stringx"
 local semaphore    = require "ngx.semaphore"
 local kong_global = require "kong.global"
 local constants = require "kong.constants"
+-- UID patch starts
+local cjson        = require "cjson"
+local SecretManagerService = require "api-gateway.aws.secretmanager.SecretManagerService"
+local concurrency = require "kong.concurrency"
+-- UID patch ends
 
 
 local setmetatable = setmetatable
@@ -191,31 +196,164 @@ end
 
 local setkeepalive
 
+local function trim_to_nil(str)
+  if str == nil then
+    return nil
+  end
+
+  str = (str:gsub("^%s*(.-)%s*$", "%1"))
+
+  if string.len(str) == 0 then
+    return nil
+  else
+    return str
+  end
+end
+
+local function is_exception_due_to_authentication_error(err)
+  if string.find(err, 'password authentication failed') then
+    return true
+  else
+    return false
+  end
+end
+
+local function fetch_latest_credentials(config)
+  local opts = {
+    name = "fetch_database_credentials"
+  }
+  return concurrency.with_worker_mutex(opts, function()
+    local value = ngx.shared.kong:get("fetch_database_credentials:loaded")
+    if value then
+      return true, nil
+    end
+
+    local aws_config = cjson.decode(ngx.shared.kong:get("aws_config"))
+    local env = trim_to_nil(aws_config.env)
+    local app = trim_to_nil(aws_config.app)
+    local region = trim_to_nil(aws_config.region)
+    local access_key_id = trim_to_nil(aws_config.access_key_id)
+    local secret_access_key = trim_to_nil(aws_config.secret_access_key)
+    local security_credentials_url = trim_to_nil(aws_config.security_credentials_url)
+
+    log(ngx.DEBUG, "ngx.shared.kong:get('aws_config')) = " .. cjson.encode(aws_config))
+
+    if env == nil or app == nil then
+      return true, nil
+    end
+
+    local aws_credentials = {}
+
+    if access_key_id ~= nil and secret_access_key ~= nil then
+      aws_credentials = {
+        provider = "api-gateway.aws.AWSBasicCredentials",
+        access_key = access_key_id,
+        secret_key = secret_access_key,
+      }
+    else
+      aws_credentials = {
+        provider = "api-gateway.aws.AWSIAMCredentials",
+      }
+    end
+
+    local service = SecretManagerService:new({
+      aws_region = region,
+      aws_credentials = aws_credentials,
+      aws_debug = true,
+      aws_conn_keepalive = 60000,
+      aws_conn_pool = 10
+    })
+
+    local result, code, headers, status, body = service:GetSecretValue(string.format("/%s/%s/DATABASE", env, app))
+    if result == nil then
+      return false, "GetSecretValue failed. code: " .. code .. " status: " .. status .. " body: " .. body
+    end
+
+    --schema      = kong_config.pg_schema or "", ???
+
+    result = cjson.decode(result["SecretString"])
+    config.host = result["host"]
+    config.port = result["port"]
+    config.user = result["username"]
+    config.password = result["password"]
+    config.database = result["dbname"]
+    --config.schema = config.schema
+
+    log(ngx.DEBUG, "refresh config: ", cjson.encode(config))
+
+    -- workers shared data
+    local ok, err = ngx.shared.kong:set("latest_config", cjson.encode(config), 86400)
+    if not ok then
+      return false, err
+    end
+    ok, err = ngx.shared.kong:set("fetch_database_credentials:loaded", true, 30)
+    if not ok then
+      return false, err
+    end
+
+    return true, nil -- fetch success
+  end)
+end
 
 local function connect(config)
-  local phase = get_phase()
-  if phase == "init" or phase == "init_worker" or ngx.IS_CLI then
-    -- Force LuaSocket usage in the CLI in order to allow for self-signed
-    -- certificates to be trusted (via opts.cafile) in the resty-cli
-    -- interpreter (no way to set lua_ssl_trusted_certificate).
-    config.socket_type = "luasocket"
+  local max_retry = 3
+  local retry_count = 0
 
-  else
-    config.socket_type = "nginx"
+  local connection
+  local success
+
+  while retry_count <= max_retry do
+    local latest_config = ngx.shared.kong:get("latest_config")
+    latest_config = (latest_config and cjson.decode(latest_config)) or {}
+    for k, v in pairs(latest_config) do
+      config[k] = v
+    end
+
+    local phase  = get_phase(kong)
+    if phase == "init" or phase == "init_worker" or ngx.IS_CLI then
+      -- Force LuaSocket usage in the CLI in order to allow for self-signed
+      -- certificates to be trusted (via opts.cafile) in the resty-cli
+      -- interpreter (no way to set lua_ssl_trusted_certificate).
+      config.socket_type = "luasocket"
+
+    else
+      config.socket_type = "nginx"
+    end
+
+    connection = pgmoon.new(config)
+
+    connection.convert_null = true
+    connection.NULL         = null
+
+    if config.timeout then
+      connection:settimeout(config.timeout)
+    end
+
+    local ok, err = connection:connect()
+    if ok then
+      success = true
+      if retry_count > 0 then
+        log(ngx.INFO, "database connect success after " ..retry_count .. " retry.")
+      end
+      break
+    else
+      if is_exception_due_to_authentication_error(err) then
+        log(WARN, "database credentails authentication failed: ", err)
+        local fetch_ok, fetch_err = fetch_latest_credentials(config)
+        if not fetch_ok then
+          return nil, fetch_err
+        end
+      else
+        return nil, err
+      end
+    end
+
+    retry_count = retry_count + 1
+    log(WARN, "database connect failed, retry number " .. retry_count)
   end
 
-  local connection = pgmoon.new(config)
-
-  connection.convert_null = true
-  connection.NULL         = null
-
-  if config.timeout then
-    connection:settimeout(config.timeout)
-  end
-
-  local ok, err = connection:connect()
-  if not ok then
-    return nil, err
+  if not success then
+    return nil, "database connect failed: reached max connection retries"
   end
 
   if connection.sock:getreusedtimes() == 0 then
@@ -972,6 +1110,14 @@ function _M.new(kong_config)
     self.config_ro = config_ro
     self.sem_read = sem
   end
+
+  -- UID patch starts
+  -- workers shared data
+  local ok, err = ngx.shared.kong:set ("latest_config", cjson.encode(config), 86400)
+  if not ok then
+    ngx.log(ngx.CRIT, "failed set pg_config to SHM", err)
+  end
+  -- UID patch ends
 
   return setmetatable(self, _mt)
 end

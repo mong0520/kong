@@ -89,11 +89,11 @@ local constants = {
   -- non-standard headers, specific to Kong
   HEADERS = {
     HOST_OVERRIDE = "X-Host-Override",
-    PROXY_LATENCY = "X-Kong-Proxy-Latency",
-    RESPONSE_LATENCY = "X-Kong-Response-Latency",
-    ADMIN_LATENCY = "X-Kong-Admin-Latency",
-    UPSTREAM_LATENCY = "X-Kong-Upstream-Latency",
-    UPSTREAM_STATUS = "X-Kong-Upstream-Status",
+    PROXY_LATENCY = "X-Proxy-Latency",
+    RESPONSE_LATENCY = "X-Response-Latency",
+    ADMIN_LATENCY = "X-Admin-Latency",
+    UPSTREAM_LATENCY = "X-Upstream-Latency",
+    UPSTREAM_STATUS = "X-Upstream-Status",
     CONSUMER_ID = "X-Consumer-ID",
     CONSUMER_CUSTOM_ID = "X-Consumer-Custom-ID",
     CONSUMER_USERNAME = "X-Consumer-Username",
